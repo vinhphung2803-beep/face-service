@@ -1,0 +1,6 @@
+# Dùng khi chạy chế độ có cửa sổ (webcam, --show) trên máy Windows.
+# opencv-python-headless KHÔNG có cv2.imshow; hai gói này xung đột nhau, nên gỡ headless trước:
+#   pip uninstall -y opencv-python-headless
+#   pip install -r requirements-desktop.txt
+numpy>=1.26
+opencv-python>=4.8.0
