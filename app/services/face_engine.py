@@ -23,6 +23,7 @@ from app.core.liveness import build_liveness_checker
 from app.core.matcher import Gallery, MatcherConfig, match_embedding
 from app.core.quality import assess_quality
 from app.utils.image_utils import decode_image, resize_max_side, sniff_image_type
+from app.services import pg_store
 from app.utils.validators import validate_employee_code, validate_upload
 
 
@@ -38,6 +39,8 @@ class FaceEngine:
 
     def __init__(self, settings: Settings, store_path: Path | None = None):
         self.settings = settings
+        # Có DATABASE_URL (và không chỉ định store_path) thì lưu embedding vào PostgreSQL.
+        self.db_url = None if store_path is not None else ((os.getenv("DATABASE_URL") or "").strip() or None)
         self.store_path = store_path or (Path(__file__).resolve().parents[2] / "data" / "enrollments.json")
         self.detector = YuNetDetector(
             settings.detector_model_path, settings.det_score_threshold,
@@ -60,12 +63,12 @@ class FaceEngine:
         }
 
     def _load_or_create_store(self) -> dict[str, Any]:
-        if not self.store_path.exists():
-            return self._new_store()
         try:
-            data = json.loads(self.store_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            data = self._read_raw()
+        except Exception as exc:  # lỗi file JSON hoặc lỗi kết nối PostgreSQL
             raise InputValidationError("STORE_INVALID", f"Không đọc được kho embedding: {exc}") from exc
+        if data is None:
+            return self._new_store()
         if (not isinstance(data, dict) or data.get("schemaVersion") != STORE_SCHEMA
                 or not isinstance(data.get("employees"), dict)):
             raise InputValidationError("STORE_INVALID", "Kho embedding sai schema")
@@ -83,6 +86,14 @@ class FaceEngine:
                 self._validate_vector(sample.get("embedding"))
         return data
 
+    def _read_raw(self) -> dict[str, Any] | None:
+        """Đọc kho thô từ PostgreSQL hoặc file JSON; None nếu chưa có."""
+        if self.db_url:
+            return pg_store.load(self.db_url)
+        if not self.store_path.exists():
+            return None
+        return json.loads(self.store_path.read_text(encoding="utf-8"))
+
     def _validate_vector(self, values) -> np.ndarray:
         try:
             vec = np.asarray(values, dtype=np.float32).ravel()
@@ -96,6 +107,9 @@ class FaceEngine:
         return (vec / norm).astype(np.float32)
 
     def _save_store(self) -> None:
+        if self.db_url:
+            pg_store.save(self.db_url, self.store)
+            return
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_path = tempfile.mkstemp(
             dir=str(self.store_path.parent), prefix=self.store_path.name + ".", suffix=".tmp"
